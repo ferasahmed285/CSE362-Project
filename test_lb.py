@@ -16,9 +16,12 @@ class MockWorker:
         time.sleep(delay)
         return Response(id=request.id, result="Success", latency=delay)
 
-# Setup the test environment
+# setup the test environment
 workers = [MockWorker(0), MockWorker(1)]
 lb = LoadBalancer(workers)
+from master.scheduler import Scheduler
+scheduler = Scheduler()
+lb.scheduler = scheduler
 
 def simulate_client_request(req_id):
     req = Request(id=req_id, query="Test")
@@ -37,7 +40,7 @@ for i in range(20):
 for _ in range(20):  # Loop more times
     time.sleep(0.01) # Check much faster
     print(f"Active Connections -> Node 0: {lb.worker_stats[0].active_connections} | Node 1: {lb.worker_stats[1].active_connections}")
-    
+
 for t in threads:
     t.join()
 

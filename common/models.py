@@ -29,4 +29,6 @@ class Response:
 class WorkerStats:
     worker_id: int
     active_connections: int = 0
+    gpu_utilization: float = 0.0
+    current_latency: float = 0.0
     is_alive: bool = True

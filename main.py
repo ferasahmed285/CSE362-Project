@@ -11,10 +11,23 @@ def main():
     lb = LoadBalancer(workers)
     
     # Scheduler
-    scheduler = Scheduler(lb)
+    scheduler = Scheduler()
     
-    # Run simulation
-    run_load_test(scheduler, num_users=1000)
+    # Wire them up properly
+    lb.scheduler = scheduler
+    
+    try:
+        # Run simulation against the Load Balancer exactly as standard arch dictates
+        run_load_test(lb, num_users=1000)
+    finally:
+        # Gracefully shutdown resources
+        for worker in workers:
+            if hasattr(worker, 'stop'):
+                worker.stop()
+        if hasattr(lb, 'stop'):
+            lb.stop()
+        if hasattr(scheduler, 'stop'):
+            scheduler.stop()
 
 if __name__ == "__main__":
     main()
