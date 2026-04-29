@@ -13,16 +13,16 @@ class RequestStatus(Enum):
 class Request:
     id: int
     query: str
-    retries: int = 0  # Tracks how many times this has been reassigned
+    retries: int = 0  
     status: RequestStatus = RequestStatus.PENDING
-    timestamp: float = time.time() # Useful for load-aware routing
+    timestamp: float = time.time() 
 
 @dataclass
 class Response:
     id: int
     result: str
     latency: float
-    success: bool = True  # Allows the worker to signal a failure gracefully
+    success: bool = True  
     error_message: str = ""
 
 @dataclass
