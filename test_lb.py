@@ -16,11 +16,14 @@ class MockWorker:
         time.sleep(delay)
         return Response(id=request.id, result="Success", latency=delay)
 
+    def ping(self):
+        return True
+
 # setup the test environment
 workers = [MockWorker(0), MockWorker(1)]
 lb = LoadBalancer(workers)
 from master.scheduler import Scheduler
-scheduler = Scheduler()
+scheduler = Scheduler(lb)
 lb.scheduler = scheduler
 
 def simulate_client_request(req_id):
