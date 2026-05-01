@@ -29,7 +29,7 @@ lb.scheduler = scheduler
 def simulate_client_request(req_id):
     req = Request(id=req_id, query="Test")
     # You can swap 'least_connections' with 'round_robin' or 'load_aware' to test different logic
-    lb.dispatch(req, strategy="least_connections")
+    lb.dispatch(req, strategy="load_aware")
 
 # Fire a burst of concurrent requests
 print("Firing 20 concurrent requests...")
