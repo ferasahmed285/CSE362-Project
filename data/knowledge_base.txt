@@ -1,0 +1,11 @@
+Load balancing distributes incoming requests across multiple servers to improve performance and reliability.
+Round Robin sends requests sequentially to each worker in order.
+Least Connections assigns requests to the worker with the fewest active connections.
+Load-aware routing uses metrics like GPU utilization to choose the best worker.
+RAG retrieves relevant external context before sending the prompt to the language model.
+GPU clusters process multiple AI requests in parallel to increase throughput.
+Fault tolerance ensures the system continues working even if some nodes fail.
+Distributed systems improve scalability by dividing tasks across multiple machines.
+High concurrency systems must manage thousands of simultaneous requests efficiently.
+Latency measures how long a request takes to be processed.
+Throughput measures how many requests are handled per second.
