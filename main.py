@@ -1,5 +1,4 @@
 # main.py - Final combined version
-# Uses member4's multi-test structure with our enhanced workers
 import threading
 import time
 
@@ -9,11 +8,10 @@ from master.scheduler import Scheduler
 from client.load_generator import run_load_test
 
 
-def simulate_failure(workers, worker_id=1, delay=0.2):
-    """Simulate a worker failure after a short delay during a live test."""
+def simulate_failure(workers, worker_id=1, delay=0.5):
     def fail_later():
         time.sleep(delay)
-        workers[worker_id].simulate_failure()  # uses our enhanced worker method
+        workers[worker_id].simulate_failure()
         print(f"\n[Test] Worker {worker_id} has been KILLED mid-test!\n")
     threading.Thread(target=fail_later, daemon=True).start()
 
@@ -25,13 +23,14 @@ def recover_all_workers(workers):
 
 
 def main():
-    # 8 workers x capacity 50 = 400 concurrent slots for 1000 users
-    workers = [GPUWorker(i, max_capacity=50) for i in range(8)]
+    # 8 workers x capacity 200 = 1600 concurrent slots
+    # This handles 1000 truly concurrent threads comfortably
+    workers = [GPUWorker(i, max_capacity=200) for i in range(8)]
 
     lb        = LoadBalancer(workers)
     scheduler = Scheduler()
-    lb.scheduler   = scheduler
-    scheduler.lb   = lb  # wire master back to LB for health checks
+    lb.scheduler = scheduler
+    scheduler.lb = lb
 
     try:
         print("\n===== TEST 1: 100 USERS =====")
@@ -44,7 +43,7 @@ def main():
 
         print("\n===== TEST 3: 1000 USERS + WORKER FAILURE =====")
         recover_all_workers(workers)
-        simulate_failure(workers, worker_id=1, delay=0.2)
+        simulate_failure(workers, worker_id=1, delay=0.5)
         run_load_test(lb, num_users=1000, strategy="least_connections")
 
         print("\n===== STRATEGY TEST 1: ROUND ROBIN =====")

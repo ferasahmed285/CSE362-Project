@@ -15,7 +15,7 @@ class Request:
     id: int
     query: str
     retries: int = 0
-    max_retries: int = 3
+    max_retries: int = 5
     status: RequestStatus = RequestStatus.PENDING
     timestamp: float = field(default_factory=time.time)  # fixed bug from original
 

@@ -44,19 +44,15 @@ class GPUWorker:
         return self.is_alive
 
     def process(self, request):
-        """
-        Returns dict with result on success.
-        Raises Exception on failure — so LB retry logic triggers correctly.
-        """
         if not self.is_alive:
             raise Exception(f"GPU-{self.id} is down")
 
         with self.load_lock:
             if self.active_jobs >= self.max_capacity:
-                # Raise exception so LB retries on a different worker
                 raise Exception(f"GPU-{self.id} at capacity ({self.active_jobs}/{self.max_capacity})")
             self.active_jobs += 1
 
+        # Update stats for LB routing decisions
         if self.stats:
             self.stats.active_connections = self.active_jobs
 
@@ -76,7 +72,6 @@ class GPUWorker:
         with self.events_lock:
             self.events.pop(request.id, None)
 
-        # If result has an error key, raise so LB handles it
         if response and "error" in response:
             raise Exception(response["error"])
 
@@ -127,6 +122,17 @@ class GPUWorker:
             request = self.request_queue.get(timeout=1.0)
         except queue.Empty:
             return
+
+        # FIX 4: Check is_alive before processing each request
+        if not self.is_alive:
+            print(f"[GPU-{self.id}] Skipping req {request.id} - worker is DOWN")
+            with self.load_lock:
+                self.active_jobs -= 1
+            if self.stats:
+                self.stats.active_connections = self.active_jobs
+            self._deliver(request.id, {"id": request.id, "error": "Worker went down", "latency": 0})
+            return
+
         self._handle_one(request)
 
     def _process_batch(self):
@@ -134,6 +140,17 @@ class GPUWorker:
             first = self.request_queue.get(timeout=1.0)
         except queue.Empty:
             return
+
+        # FIX 4: Check is_alive before processing the batch
+        if not self.is_alive:
+            print(f"[GPU-{self.id}] Skipping req {first.id} - worker is DOWN")
+            with self.load_lock:
+                self.active_jobs -= 1
+            if self.stats:
+                self.stats.active_connections = self.active_jobs
+            self._deliver(first.id, {"id": first.id, "error": "Worker went down", "latency": 0})
+            return
+
         batch    = [first]
         deadline = time.time() + (BATCH_WINDOW_MS / 1000.0)
         while time.time() < deadline and len(batch) < MAX_BATCH_SIZE:
@@ -141,6 +158,7 @@ class GPUWorker:
                 batch.append(self.request_queue.get_nowait())
             except queue.Empty:
                 break
+
         if len(batch) == 1:
             self._handle_one(batch[0])
         else:
@@ -150,9 +168,9 @@ class GPUWorker:
         start = time.time()
         print(f"[GPU-{self.id}] Processing req {request.id}: '{request.query}'")
         try:
-            context = retrieve_context(request.query)
-            result  = run_llm(request.query, context)
-            latency = time.time() - start
+            context  = retrieve_context(request.query)
+            result   = run_llm(request.query, context)
+            latency  = time.time() - start
             response = {"id": request.id, "result": result, "latency": latency}
             with self.metrics_lock:
                 self.total_processed += 1

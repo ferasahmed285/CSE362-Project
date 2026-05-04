@@ -1,0 +1,20 @@
+Load balancing is the process of distributing incoming network requests across multiple servers to ensure no single server is overwhelmed.
+Round Robin is a load balancing strategy that distributes requests sequentially across all available servers in a circular order.
+Least Connections is a load balancing strategy that routes each new request to the server with the fewest active connections.
+Load-aware routing uses real-time metrics like CPU and GPU utilization to make smarter routing decisions beyond just connection count.
+GPU clusters are groups of graphics processing units working together to handle computationally intensive tasks like AI inference.
+Large Language Models are neural networks trained on vast amounts of text data to understand and generate human language.
+Retrieval Augmented Generation combines a retrieval system with a language model to provide more accurate and contextual responses.
+Fault tolerance is the ability of a system to continue operating correctly even when some of its components fail.
+A master node in a distributed system coordinates task scheduling and monitors the health of all worker nodes.
+Distributed computing involves multiple computers working together to solve a problem or provide a service.
+GPU utilization refers to the percentage of time the GPU is actively processing tasks versus sitting idle.
+Batch processing groups multiple requests together and processes them simultaneously to improve GPU efficiency.
+A heartbeat mechanism periodically checks if worker nodes are alive and responsive in a distributed system.
+Task reassignment automatically moves tasks from a failed node to healthy nodes to maintain system availability.
+Scalability is the ability of a system to handle increasing amounts of work by adding more resources.
+Concurrency allows multiple tasks to be executed at the same time using threading or parallel processing.
+A vector database stores data as high-dimensional vectors to enable fast similarity search for RAG systems.
+Inference latency is the time taken for a model to process an input and return a result.
+Throughput measures how many requests a system can successfully process per unit of time.
+The P95 latency represents the 95th percentile response time meaning 95 percent of requests complete within this threshold.

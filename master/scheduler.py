@@ -1,4 +1,4 @@
-# master/scheduler.py - from track1 branch (best version)
+# master/scheduler.py
 import queue
 import threading
 import time
@@ -7,15 +7,12 @@ from common.models import RequestStatus, InternalTaskMessage
 class Scheduler:
     def __init__(self, lb=None):
         self.task_queue = queue.Queue()
-        self.results = {}
-        self.lb = lb
+        self.results    = {}
+        self.lb         = lb
         self._stop_event = threading.Event()
 
-        self.health_thread = threading.Thread(target=self._health_check_loop, daemon=True)
-        self.health_thread.start()
-
-        self.dispatcher_thread = threading.Thread(target=self._dispatch_loop, daemon=True)
-        self.dispatcher_thread.start()
+        threading.Thread(target=self._health_check_loop, daemon=True).start()
+        threading.Thread(target=self._dispatch_loop,     daemon=True).start()
 
     def set_lb(self, lb):
         self.lb = lb
@@ -46,9 +43,9 @@ class Scheduler:
         request.status = RequestStatus.PENDING
         event = threading.Event()
         self.results[request.id] = {
-            "event": event,
+            "event":    event,
             "response": None,
-            "request": request,
+            "request":  request,
             "strategy": strategy
         }
         self.task_queue.put(request.id)
@@ -62,19 +59,16 @@ class Scheduler:
             except queue.Empty:
                 continue
             task_info = self.results[req_id]
-            request  = task_info["request"]
-            strategy = task_info["strategy"]
-            t = threading.Thread(
+            threading.Thread(
                 target=self._run_worker_task_with_retries,
-                args=(req_id, request, strategy),
+                args=(req_id, task_info["request"], task_info["strategy"]),
                 daemon=True
-            )
-            t.start()
+            ).start()
 
     def _run_worker_task_with_retries(self, req_id, request, strategy):
-        retries  = request.retries
+        retries     = request.retries
         max_retries = request.max_retries
-        response = None
+        response    = None
 
         while retries < max_retries:
             try:
@@ -88,25 +82,25 @@ class Scheduler:
                 response = {"id": req_id, "error": str(e), "latency": 0}
                 break
 
-            with self.lb.lock:
-                self.lb.worker_stats[worker.id].active_connections += 1
+            # FIX 3: Scheduler does NOT touch active_connections.
+            # The worker manages its own active_jobs and updates stats directly.
+            # This removes the double-counting bug.
 
             try:
                 request.status = RequestStatus.PROCESSING
                 task_msg = InternalTaskMessage(
-                    request=request,
-                    worker_id=worker.id,
-                    failure_flags=["retried"] if retries > 0 else [],
-                    retry_count=retries
+                    request       = request,
+                    worker_id     = worker.id,
+                    failure_flags = ["retried"] if retries > 0 else [],
+                    retry_count   = retries
                 )
                 worker_response = worker.process(request)
-                request.status = RequestStatus.COMPLETED
-                response = worker_response
+                request.status  = RequestStatus.COMPLETED
+                response        = worker_response
                 break
 
             except Exception as e:
                 err = str(e)
-                # Only mark offline for real failures, not capacity rejections
                 if "at capacity" in err or "capacity" in err.lower():
                     print(f"[Master] Worker {worker.id} full, retrying on another...")
                 else:
@@ -115,14 +109,11 @@ class Scheduler:
                         self.lb.worker_stats[worker.id].is_alive = False
                 retries += 1
                 request.retries = retries
-            finally:
-                with self.lb.lock:
-                    self.lb.worker_stats[worker.id].active_connections -= 1
 
         if not response:
             request.status = RequestStatus.FAILED
             response = {
-                "id": req_id,
+                "id":    req_id,
                 "error": f"Failed after {max_retries} attempts.",
                 "latency": 0
             }
