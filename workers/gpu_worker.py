@@ -109,6 +109,10 @@ class GPUWorker:
 
     def _processing_loop(self):
         while True:
+            # Fix: check is_alive at top of every loop iteration
+            if not self.is_alive:
+                time.sleep(0.1)
+                continue
             try:
                 if self.enable_batching:
                     self._process_batch()
