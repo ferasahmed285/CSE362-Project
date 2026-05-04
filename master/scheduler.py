@@ -1,57 +1,134 @@
+# master/scheduler.py - from track1 branch (best version)
 import queue
 import threading
-from common.models import RequestStatus
+import time
+from common.models import RequestStatus, InternalTaskMessage
 
 class Scheduler:
-    def __init__(self):
+    def __init__(self, lb=None):
         self.task_queue = queue.Queue()
         self.results = {}
-        
+        self.lb = lb
         self._stop_event = threading.Event()
+
+        self.health_thread = threading.Thread(target=self._health_check_loop, daemon=True)
+        self.health_thread.start()
+
         self.dispatcher_thread = threading.Thread(target=self._dispatch_loop, daemon=True)
         self.dispatcher_thread.start()
 
-    def enqueue_task(self, request, worker_selected):
-        """Called by the LB to hand off the task non-blocking."""
+    def set_lb(self, lb):
+        self.lb = lb
+
+    def _health_check_loop(self):
+        while not self._stop_event.is_set():
+            if not self.lb:
+                time.sleep(1.0)
+                continue
+            for worker in self.lb.workers:
+                try:
+                    is_alive = hasattr(worker, 'ping') and worker.ping()
+                    with self.lb.lock:
+                        was_alive = self.lb.worker_stats[worker.id].is_alive
+                        self.lb.worker_stats[worker.id].is_alive = bool(is_alive)
+                        if not was_alive and is_alive:
+                            print(f"[Master] Worker {worker.id} recovered and is back ONLINE")
+                        elif was_alive and not is_alive:
+                            print(f"[Master] Worker {worker.id} failed ping. Marked OFFLINE")
+                except Exception:
+                    with self.lb.lock:
+                        if self.lb.worker_stats[worker.id].is_alive:
+                            print(f"[Master] Worker {worker.id} timed out. Marked OFFLINE")
+                        self.lb.worker_stats[worker.id].is_alive = False
+            time.sleep(2.5)
+
+    def submit_task(self, request, strategy="least_connections"):
         request.status = RequestStatus.PENDING
         event = threading.Event()
-        # Store full task info
-        self.results[request.id] = {"event": event, "response": None, "worker": worker_selected, "request": request}
+        self.results[request.id] = {
+            "event": event,
+            "response": None,
+            "request": request,
+            "strategy": strategy
+        }
         self.task_queue.put(request.id)
-        
-        return event
-
-    def get_result(self, request_id):
-        return self.results[request_id]["response"]
+        event.wait()
+        return self.results[request.id]["response"]
 
     def _dispatch_loop(self):
-        """Pulls from the global queue and hands it directly to the designated worker."""
         while not self._stop_event.is_set():
             try:
                 req_id = self.task_queue.get(timeout=1.0)
             except queue.Empty:
                 continue
-                
             task_info = self.results[req_id]
-            worker = task_info["worker"]
-            request = task_info["request"]
-            
-            # Spin up a thread to process the worker assignment without blocking the master queue!
-            t = threading.Thread(target=self._run_worker_task, args=(req_id, worker, request), daemon=True)
+            request  = task_info["request"]
+            strategy = task_info["strategy"]
+            t = threading.Thread(
+                target=self._run_worker_task_with_retries,
+                args=(req_id, request, strategy),
+                daemon=True
+            )
             t.start()
 
-    def _run_worker_task(self, req_id, worker, request):
-        try:
-            request.status = RequestStatus.PROCESSING
-            response = worker.process(request)
-            request.status = RequestStatus.COMPLETED
-            self.results[req_id]["response"] = response
-        except Exception as e:
+    def _run_worker_task_with_retries(self, req_id, request, strategy):
+        retries  = request.retries
+        max_retries = request.max_retries
+        response = None
+
+        while retries < max_retries:
+            try:
+                if strategy == "least_connections":
+                    worker = self.lb.get_worker_least_connections()
+                elif strategy == "load_aware":
+                    worker = self.lb.get_worker_load_aware()
+                else:
+                    worker = self.lb.get_worker_round_robin()
+            except Exception as e:
+                response = {"id": req_id, "error": str(e), "latency": 0}
+                break
+
+            with self.lb.lock:
+                self.lb.worker_stats[worker.id].active_connections += 1
+
+            try:
+                request.status = RequestStatus.PROCESSING
+                task_msg = InternalTaskMessage(
+                    request=request,
+                    worker_id=worker.id,
+                    failure_flags=["retried"] if retries > 0 else [],
+                    retry_count=retries
+                )
+                worker_response = worker.process(request)
+                request.status = RequestStatus.COMPLETED
+                response = worker_response
+                break
+
+            except Exception as e:
+                err = str(e)
+                # Only mark offline for real failures, not capacity rejections
+                if "at capacity" in err or "capacity" in err.lower():
+                    print(f"[Master] Worker {worker.id} full, retrying on another...")
+                else:
+                    print(f"[Master] Worker {worker.id} error: {e}. Marking OFFLINE.")
+                    with self.lb.lock:
+                        self.lb.worker_stats[worker.id].is_alive = False
+                retries += 1
+                request.retries = retries
+            finally:
+                with self.lb.lock:
+                    self.lb.worker_stats[worker.id].active_connections -= 1
+
+        if not response:
             request.status = RequestStatus.FAILED
-            self.results[req_id]["response"] = {"id": req_id, "error": str(e), "latency": 0}
-        finally:
-            # Signal that the response is ready
-            self.results[req_id]["event"].set()
+            response = {
+                "id": req_id,
+                "error": f"Failed after {max_retries} attempts.",
+                "latency": 0
+            }
+
+        self.results[req_id]["response"] = response
+        self.results[req_id]["event"].set()
 
     def stop(self):
         self._stop_event.set()

@@ -1,6 +1,5 @@
 # lb/load_balancer.py
 import threading
-import time
 from common.models import WorkerStats
 
 class LoadBalancer:
@@ -23,36 +22,12 @@ class LoadBalancer:
         # Lock to prevent race conditions during concurrent requests
         self.lock = threading.Lock()
         
-        # Start the health check loop thread
-        self._stop_event = threading.Event()
-        self.health_thread = threading.Thread(target=self._health_check_loop, daemon=True)
-        self.health_thread.start()
-
-    def _health_check_loop(self):
-        """Pings every worker periodically (every 2.5 seconds) to update their alive status."""
-        while not self._stop_event.is_set():
-            for worker in self.workers:
-                try:
-                    # In a real system, this would be a network request
-                    is_alive = hasattr(worker, 'ping') and worker.ping()
-                    with self.lock:
-                        was_alive = self.worker_stats[worker.id].is_alive
-                        self.worker_stats[worker.id].is_alive = bool(is_alive)
-                        
-                        if not was_alive and is_alive:
-                            print(f"[LB] Worker {worker.id} has recovered and is back online!")
-                        elif was_alive and not is_alive:
-                            print(f"[LB] Worker {worker.id} failed ping. Marked offline.")
-                except Exception:
-                    # If ping fails or times out, mark as dead
-                    with self.lock:
-                        if self.worker_stats[worker.id].is_alive:
-                            print(f"[LB] Worker {worker.id} timed out. Marked offline.")
-                        self.worker_stats[worker.id].is_alive = False
-            time.sleep(2.5)
+        # NOTE: The health check loop has been moved to the Master Node (Scheduler)
+        # to properly separate Routing from Orchestration & Resilience.
 
     def stop(self):
-        self._stop_event.set()
+        # Stop signal removed as LB no longer runs threads natively.
+        pass
 
     def get_worker_round_robin(self):
         """Baseline strategy: cycles through alive workers sequentially."""
@@ -79,59 +54,42 @@ class LoadBalancer:
             return next(w for w in self.workers if w.id == best_stat.worker_id)
 
     def get_worker_load_aware(self):
-        """Advanced strategy: routes based on reported gpu_utilization."""
+        """
+        Advanced strategy (100% Goal): Adaptive Weighted Load-Aware Routing.
+        
+        Instead of basic Round Robin or just Least Connections (which acts as Join-the-Shortest-Queue),
+        this algorithm calculates a composite 'load score'. It evaluates BOTH the current queue length 
+        (active_connections) AND the physical hardware load (gpu_utilization).
+        
+        Wider Reading / Theory Application: 
+        While "Join-the-Shortest-Queue" (JSQ) is effective for homogeneous tasks, AI/LLM inference 
+        tasks have high variance in execution time. A node with a short queue might still be 
+        bottlenecked by high thermal GPU usage from a previous heavy query. By combining queue length 
+        with physical GPU utilization metrics, this algorithm avoids the "herd behavior" routing problem.
+        """
         with self.lock:
             alive_stats = [s for s in self.worker_stats.values() if s.is_alive]
             if not alive_stats:
                 raise Exception("CRITICAL: All GPU worker nodes are offline!")
             
-            # Load-aware routes to the worker with the lowest GPU utilization
-            best_stat = min(alive_stats, key=lambda s: s.gpu_utilization)
+            # Algorithm Weights:
+            # Active connections (Queue length) are heavily weighted because LLM inference is highly sequential.
+            # GPU Utilization is factored in to break ties and prevent routing to throttling nodes.
+            W_QUEUE = 1.0
+            W_GPU = 0.05  # Scale down percentage (0-100) to match queue length scale
+            
+            def calculate_load_score(stat):
+                return (stat.active_connections * W_QUEUE) + (stat.gpu_utilization * W_GPU)
+            
+            # Select the node with the lowest composite load score
+            best_stat = min(alive_stats, key=calculate_load_score)
             return next(w for w in self.workers if w.id == best_stat.worker_id)
 
     def dispatch(self, request, strategy="least_connections"):
-        """Routes the request based on the selected strategy with fault tolerance."""
-        max_retries = 3 
-        retries = 0
-        
-        while retries < max_retries:
-            # 1. Select the worker
-            if strategy == "least_connections":
-                worker = self.get_worker_least_connections()
-            elif strategy == "load_aware":
-                worker = self.get_worker_load_aware()
-            else:
-                worker = self.get_worker_round_robin()
-                
-            # 2. Increment tracker safely
-            with self.lock:
-                self.worker_stats[worker.id].active_connections += 1
-                
-            try:
-                # 3. Non-blocking hand-off to the Master/Scheduler
-                if not self.scheduler:
-                    raise Exception("LoadBalancer has no attached Master/Scheduler!")
-                    
-                # LB immediately schedules the task asynchronously
-                event = self.scheduler.enqueue_task(request, worker)
-                
-                # Client Thread blocks cleanly awaiting the Master, but LB Thread doesn't stall!
-                event.wait() 
-                response = self.scheduler.get_result(request.id)
-                
-                if "error" in response:
-                    raise Exception(response["error"]) # Trip the retry logic on failure
-                
-                return response
-            except Exception as e:
-                # 4. Fault Detection & Task Reassignment
-                print(f"[LB] Error on Worker {worker.id}: {e}. Marking as offline and reassigning...")
-                with self.lock:
-                    self.worker_stats[worker.id].is_alive = False
-                retries += 1
-            finally:
-                # 5. Decrement tracker safely
-                with self.lock:
-                    self.worker_stats[worker.id].active_connections -= 1
-                    
-        raise Exception(f"[LB] CRITICAL: Failed to process request {request.id} after {max_retries} attempts.")
+        """Entry point for requests. Defer execution and retries to the Master Node."""
+        if not self.scheduler:
+            raise Exception("LoadBalancer has no attached Master/Scheduler!")
+            
+        # The Master Node now handles fault detection and task reassignment.
+        # It will call get_worker_* methods to fetch a node based on the given strategy.
+        return self.scheduler.submit_task(request, strategy=strategy)
