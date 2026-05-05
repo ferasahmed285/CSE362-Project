@@ -7,7 +7,49 @@
 
 ## Project Overview
 
-This project implements a distributed system capable of handling 1000+ concurrent user requests involving Large Language Model (LLM) inference and Retrieval-Augmented Generation (RAG). The system focuses on efficient load balancing, GPU cluster task distribution, fault tolerance, and scalability.
+This project implements a distributed system that handles concurrent user requests using a real Large Language Model (LLM) inference engine and Retrieval-Augmented Generation (RAG). The system demonstrates efficient load balancing, GPU cluster task distribution, fault tolerance, and scalability using a real AI model running locally via Ollama.
+
+---
+
+## Requirements
+
+- Python 3.9+
+- Ollama (local LLM runtime)
+- ollama Python library
+
+---
+
+## Setup Instructions
+
+### Step 1 — Install Ollama
+Download and install from: **https://ollama.com**
+
+### Step 2 — Pull the AI model
+```bash
+ollama pull tinyllama
+```
+This downloads the tinyllama model (~637MB). It is a real neural network that generates actual AI responses.
+
+### Step 3 — Start Ollama server
+```bash
+ollama serve
+```
+Keep this running in a separate terminal while using the project.
+
+### Step 4 — Install Python dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### Step 5 — Run the project
+```bash
+python main.py
+```
+
+### Step 6 — Run unit tests
+```bash
+python test_lb.py
+```
 
 ---
 
@@ -22,47 +64,43 @@ CSE362-Project/
 ├── master/
 │   └── scheduler.py        # Master node: task scheduling + fault detection
 ├── workers/
-│   ├── gpu_worker.py       # GPU worker with batching, metrics, fault tolerance
-│   └── metrics.py          # Performance metrics tracker
+│   └── gpu_worker.py       # GPU worker with capacity limits and fault tolerance
 ├── llm/
-│   └── inference.py        # LLM inference simulation (variable latency)
+│   └── inference.py        # Real LLM inference using Ollama (tinyllama)
 ├── rag/
 │   └── retriever.py        # RAG module with keyword-based retrieval
 ├── client/
-│   └── load_generator.py   # Load generator simulating 1000 concurrent users
+│   └── load_generator.py   # Load generator simulating concurrent users
 ├── data/
 │   └── knowledge_base.txt  # Knowledge base for RAG retrieval
 ├── main.py                 # Main entry point - runs all 6 tests
 ├── test_lb.py              # Unit tests for load balancer + scheduler
+├── requirements.txt        # Python dependencies
 └── README.md               # This file
 ```
 
 ---
 
-## How to Run
+## How It Works
 
-### Requirements
-- Python 3.9+
+### Real LLM Integration
+Unlike simulated systems, this project uses **tinyllama** — a real neural network running locally via Ollama. Each request is processed by the actual model, producing genuine AI-generated responses. This means:
+- Each request takes 1-10 seconds of real computation
+- Responses are different each time (non-deterministic)
+- The system must handle real-world latency variance
 
-### Install dependencies
-No external packages needed — uses Python standard library only.
+### System Architecture
 
-### Run the full test suite
-```bash
-python main.py
 ```
-
-This automatically runs 6 tests:
-1. 100 concurrent users
-2. 500 concurrent users
-3. 1000 concurrent users + worker failure mid-run
-4. 1000 users with Round Robin strategy
-5. 1000 users with Least Connections strategy
-6. 1000 users with Load Aware strategy
-
-### Run unit tests
-```bash
-python test_lb.py
+Client Layer (concurrent users)
+        ↓
+Load Balancer (routing strategy selection)
+        ↓
+Master Node / Scheduler (task queuing + fault detection)
+        ↓
+GPU Workers 0-7 (real LLM inference via Ollama + RAG)
+        ↑
+RAG Module (knowledge base retrieval)
 ```
 
 ---
@@ -70,95 +108,47 @@ python test_lb.py
 ## Load Balancing Strategies
 
 ### 1. Round Robin
-Distributes requests sequentially across all alive workers in circular order. Simple and fair but does not account for current load.
+Distributes requests sequentially across all alive workers in circular order.
 
 ### 2. Least Connections
-Routes each new request to the worker with the fewest active connections. More intelligent than Round Robin — avoids overloading busy workers.
+Routes each new request to the worker with the fewest active connections.
 
-### 3. Load Aware (Best)
-Calculates a composite load score combining active connections and GPU utilization:
-```
-score = (active_connections × 1.0) + (gpu_utilization × 0.05)
-```
-Routes to the worker with the lowest score. Handles both queue depth and hardware load for optimal routing.
-
----
-
-## System Architecture
-
-```
-Client Layer (1000 concurrent users)
-        ↓
-Load Balancer (routing strategy selection)
-        ↓
-Master Node / Scheduler (task queuing + fault detection)
-        ↓
-GPU Workers 0-7 (LLM inference + RAG + batching)
-        ↑
-RAG Module (knowledge base retrieval)
-```
+### 3. Load Aware
+Calculates a composite load score using active connections and GPU utilization, routing to the lowest-scored worker.
 
 ---
 
 ## Fault Tolerance
 
-- **Health monitoring:** Master node pings all workers every 2.5 seconds
+- **Health monitoring:** Master node pings all workers every 15 seconds
 - **Failure detection:** Worker marked offline if ping fails
 - **Task reassignment:** Failed tasks automatically retried on other workers (up to 5 attempts)
-- **Recovery:** Workers can be brought back online via `worker.recover()`
-- **Demo:** Test 3 kills Worker 1 mid-run and still achieves 1000/1000 success
-
----
-
-## GPU Worker Features
-
-- **Batching:** Groups up to 8 requests together for parallel processing (35% faster per-request)
-- **Capacity limits:** Each worker has configurable max concurrent requests
-- **Thread safety:** Lock-protected counters prevent race conditions
-- **Metrics tracking:** Tracks total processed, failures, avg latency, p95 latency
-
----
-
-## LLM Simulation
-
-Real LLM replaced with realistic simulation:
-- Variable latency based on query token count (`time_per_token = 0.008s`)
-- Gaussian random noise (`std = 0.03s`) simulates GPU variance
-- Batch processing speedup factor (`0.65x`) simulates GPU parallelism
-- RAG context integrated into response
-
----
-
-## RAG (Retrieval-Augmented Generation)
-
-- Reads from `data/knowledge_base.txt`
-- Splits text into sentences (chunks)
-- Scores each chunk by keyword overlap with query
-- Returns top 3 most relevant chunks as context
-- Results cached to avoid re-processing identical queries
+- **Recovery:** Workers automatically come back online after recovery
+- **Demo:** Test 3 kills Worker 1 mid-run — system recovers with 0 failed requests
 
 ---
 
 ## Testing & Results
 
-| Test | Users | Success | Failed | Throughput | Avg Latency | P95 Latency |
-|------|-------|---------|--------|------------|-------------|-------------|
-| Test 1 | 100 | 100 | 0 | 151 req/s | 0.377s | 0.452s |
-| Test 2 | 500 | 500 | 0 | 293 req/s | 0.554s | 0.755s |
-| Test 3 + failure | 1000 | 1000 | 0 | 294 req/s | 1.294s | 2.355s |
-| Round Robin | 1000 | 1000 | 0 | 399 req/s | 1.198s | 1.981s |
-| Least Connections | 1000 | 1000 | 0 | 394 req/s | 1.182s | 1.962s |
-| Load Aware | 1000 | 1000 | 0 | 402 req/s | 1.165s | 1.944s |
+Tests use real LLM inference. User counts are lower than simulation because real AI inference takes 1-10 seconds per request, which is the realistic behavior of actual GPU-based LLM serving systems.
+
+| Test | Users | Success | Failed | Throughput | Avg Latency |
+|------|-------|---------|--------|------------|-------------|
+| Test 1 | 10 | 10 | 0 | 1.17 req/s | 5.17s |
+| Test 2 | 20 | 20 | 0 | 1.26 req/s | 8.43s |
+| Test 3 + failure | 24 | 24 | 0 | 0.77 req/s | 10.74s |
+| Round Robin | 24 | 24 | 0 | 1.22 req/s | 10.56s |
+| Least Connections | 24 | 24 | 0 | 1.07 req/s | 11.81s |
+| Load Aware | 24 | 24 | 0 | 1.09 req/s | 11.16s |
 
 ---
 
 ## Limitations
 
-- LLM inference is simulated, not a real model
-- GPU workers are threads, not physical GPU servers
-- Knowledge base is small (20 sentences) — real RAG would use a vector database
+- Ollama processes one request at a time per worker (no true GPU batching without hardware)
+- Knowledge base is small (20 sentences) — production RAG uses vector databases
 - No persistent storage — all state is in-memory
-- No authentication or security layer
+- tinyllama is a small model — larger models like Llama2-7B would give better responses but require more RAM
 
 ---
 
