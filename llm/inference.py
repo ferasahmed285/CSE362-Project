@@ -65,8 +65,10 @@ def run_llm(query: str, context: str = "") -> str:
         return response["message"]["content"].strip()
 
     except Exception as e:
-        # If Ollama is not running or model not found, return helpful error
-        return f"[LLM Error: {str(e)}] Make sure Ollama is running: 'ollama serve'"
+        raise RuntimeError(
+            f"LLM inference failed: {str(e)}. "
+            f"Make sure Ollama is running: 'ollama serve' and model is pulled: 'ollama pull tinyllama'"
+        )
 
 
 def run_llm_batch(requests: list) -> list:

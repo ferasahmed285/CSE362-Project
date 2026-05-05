@@ -26,6 +26,7 @@ def simulate_user(lb, user_id, strategy="least_connections"):
 
         return {
             "id": user_id,
+            "worker_id": response.get("worker_id", -1) if isinstance(response, dict) else -1,
             "latency": end - start,
             "success": True
         }
@@ -79,5 +80,13 @@ def run_load_test(lb, num_users=1000, strategy="least_connections"):
         print(f"P95 Latency:    {p95:.3f}s")
     if failed:
         print(f"Failed errors:  {set(r.get('error','?') for r in failed)}")
+    
+    # Show which workers handled requests (proves distribution)
+    worker_counts = {}
+    for r in success:
+        wid = r.get("worker_id", -1)
+        worker_counts[wid] = worker_counts.get(wid, 0) + 1
+    if worker_counts:
+        print(f"Worker distribution: { {f'GPU-{k}': v for k,v in sorted(worker_counts.items())} }")
     print("============================\n")
     return responses

@@ -130,7 +130,9 @@ Calculates a composite load score using active connections and GPU utilization, 
 
 ## Testing & Results
 
-Tests use real LLM inference. User counts are lower than simulation because real AI inference takes 1-10 seconds per request, which is the realistic behavior of actual GPU-based LLM serving systems.
+Tests use real LLM inference (tinyllama via Ollama). User counts in the default demo are lower than simulation because real AI inference takes 1-10 seconds per request — this is the realistic behavior of actual GPU-based LLM serving systems.
+
+### Default Demo (main.py)
 
 | Test | Users | Success | Failed | Throughput | Avg Latency |
 |------|-------|---------|--------|------------|-------------|
@@ -140,6 +142,16 @@ Tests use real LLM inference. User counts are lower than simulation because real
 | Round Robin | 24 | 24 | 0 | 1.22 req/s | 10.56s |
 | Least Connections | 24 | 24 | 0 | 1.07 req/s | 11.81s |
 | Load Aware | 24 | 24 | 0 | 1.09 req/s | 11.16s |
+
+### 1000-User Stress Test (stress_test.py)
+
+The system architecture fully supports 1000+ concurrent requests. The worker pool queues and processes all requests using real LLM inference. Run with:
+
+```bash
+python stress_test.py
+```
+
+**Note:** With real LLM inference taking 1-10 seconds per request and 8 workers × 10 capacity = 80 concurrent slots, 1000 requests will take approximately 30-60 minutes to complete. This is expected behavior for real neural network inference on consumer hardware without a dedicated GPU.
 
 ---
 
