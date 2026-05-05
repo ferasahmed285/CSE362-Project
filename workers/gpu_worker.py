@@ -175,7 +175,7 @@ class GPUWorker:
             context  = retrieve_context(request.query)
             result   = run_llm(request.query, context)
             latency  = time.time() - start
-            response = {"id": request.id, "result": result, "latency": latency}
+            response = {"id": request.id, "worker_id": self.id, "result": result, "latency": latency}
             with self.metrics_lock:
                 self.total_processed += 1
                 self.latency_history.append(latency)
@@ -212,7 +212,7 @@ class GPUWorker:
                 self.stats.current_latency = per_lat
             print(f"[GPU-{self.id}] Batch done: {n} reqs in {latency:.3f}s ({per_lat:.3f}s each)")
             for request, result_text in zip(requests, results):
-                self._deliver(request.id, {"id": request.id, "result": result_text, "latency": per_lat})
+                self._deliver(request.id, {"id": request.id, "worker_id": self.id, "result": result_text, "latency": per_lat})
         except Exception as e:
             latency = time.time() - start
             for request in requests:
@@ -237,8 +237,9 @@ class GPUWorker:
         while True:
             time.sleep(1.0)
             if self.stats and self.is_alive:
-                util = min(100.0, (self.active_jobs / self.max_capacity) * 100)
-                if self.active_jobs == 0:
-                    util = random.uniform(1.0, 5.0)
-                self.stats.gpu_utilization = round(util, 1)
+                with self.load_lock:
+                    jobs = self.active_jobs
+                # Fix: ensure utilization is always 0-100, never negative
+                util = round(max(0.0, min(100.0, (jobs / self.max_capacity) * 100)), 1)
+                self.stats.gpu_utilization = util
                 self.stats.max_capacity    = self.max_capacity

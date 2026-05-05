@@ -1,4 +1,4 @@
-# main.py - Final combined version
+# main.py - Final version with REAL LLM (Ollama)
 import threading
 import time
 
@@ -8,7 +8,7 @@ from master.scheduler import Scheduler
 from client.load_generator import run_load_test
 
 
-def simulate_failure(workers, worker_id=1, delay=0.5):
+def simulate_failure(workers, worker_id=1, delay=5.0):
     def fail_later():
         time.sleep(delay)
         workers[worker_id].simulate_failure()
@@ -22,10 +22,28 @@ def recover_all_workers(workers):
         worker.is_alive = True
 
 
+def print_worker_metrics(workers, lb):
+    print("\n========== GPU WORKER METRICS ==========")
+    for worker in workers:
+        summary = worker.get_metrics_summary()
+        with lb.lock:
+            util = lb.worker_stats[worker.id].gpu_utilization
+        print(
+            f"  GPU-{worker.id} | "
+            f"Processed: {summary['total_processed']:>4} | "
+            f"Failed: {summary['total_failed']:>2} | "
+            f"Avg Latency: {summary['avg_latency_s']:.3f}s | "
+            f"P95: {summary['p95_latency_s']:.3f}s | "
+            f"GPU Util: {util}%"
+        )
+    print("========================================\n")
+
+
 def main():
-    # 8 workers x capacity 200 = 1600 concurrent slots
-    # This handles 1000 truly concurrent threads comfortably
-    workers = [GPUWorker(i, max_capacity=200) for i in range(8)]
+    # Real LLM (tinyllama via Ollama) takes 3-10s per request
+    # 8 workers x capacity 3 = 24 concurrent real LLM slots
+    # This is realistic - real GPU servers handle limited concurrent inferences
+    workers = [GPUWorker(i, max_capacity=3, enable_batching=False) for i in range(8)]
 
     lb        = LoadBalancer(workers)
     scheduler = Scheduler()
@@ -33,30 +51,36 @@ def main():
     scheduler.lb = lb
 
     try:
-        print("\n===== TEST 1: 100 USERS =====")
+        print("\n===== TEST 1: 10 USERS (Real LLM) =====")
         recover_all_workers(workers)
-        run_load_test(lb, num_users=100, strategy="least_connections")
+        run_load_test(lb, num_users=10, strategy="least_connections")
+        print_worker_metrics(workers, lb)
 
-        print("\n===== TEST 2: 500 USERS =====")
+        print("\n===== TEST 2: 20 USERS (Real LLM) =====")
         recover_all_workers(workers)
-        run_load_test(lb, num_users=500, strategy="least_connections")
+        run_load_test(lb, num_users=20, strategy="least_connections")
+        print_worker_metrics(workers, lb)
 
-        print("\n===== TEST 3: 1000 USERS + WORKER FAILURE =====")
+        print("\n===== TEST 3: 24 USERS + WORKER FAILURE (Real LLM) =====")
         recover_all_workers(workers)
-        simulate_failure(workers, worker_id=1, delay=0.5)
-        run_load_test(lb, num_users=1000, strategy="least_connections")
+        simulate_failure(workers, worker_id=1, delay=5.0)
+        run_load_test(lb, num_users=24, strategy="least_connections")
+        print_worker_metrics(workers, lb)
 
         print("\n===== STRATEGY TEST 1: ROUND ROBIN =====")
         recover_all_workers(workers)
-        run_load_test(lb, num_users=1000, strategy="round_robin")
+        run_load_test(lb, num_users=24, strategy="round_robin")
+        print_worker_metrics(workers, lb)
 
         print("\n===== STRATEGY TEST 2: LEAST CONNECTIONS =====")
         recover_all_workers(workers)
-        run_load_test(lb, num_users=1000, strategy="least_connections")
+        run_load_test(lb, num_users=24, strategy="least_connections")
+        print_worker_metrics(workers, lb)
 
         print("\n===== STRATEGY TEST 3: LOAD AWARE =====")
         recover_all_workers(workers)
-        run_load_test(lb, num_users=1000, strategy="load_aware")
+        run_load_test(lb, num_users=24, strategy="load_aware")
+        print_worker_metrics(workers, lb)
 
     finally:
         print("\nShutting down...")

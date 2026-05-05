@@ -37,7 +37,7 @@ class Scheduler:
                         if self.lb.worker_stats[worker.id].is_alive:
                             print(f"[Master] Worker {worker.id} timed out. Marked OFFLINE")
                         self.lb.worker_stats[worker.id].is_alive = False
-            time.sleep(2.5)
+            time.sleep(15.0)  # Real LLM takes 5-10s per request, check less frequently
 
     def submit_task(self, request, strategy="least_connections"):
         request.status = RequestStatus.PENDING
@@ -49,8 +49,15 @@ class Scheduler:
             "strategy": strategy
         }
         self.task_queue.put(request.id)
-        event.wait()
-        return self.results[request.id]["response"]
+
+        # Issue 3 fix: timeout protection - never wait forever
+        if not event.wait(timeout=60):
+            self.results.pop(request.id, None)  # cleanup memory
+            return {"id": request.id, "error": "Scheduler timeout", "latency": 0}
+
+        response = self.results[request.id]["response"]
+        self.results.pop(request.id, None)  # cleanup memory after returning
+        return response
 
     def _dispatch_loop(self):
         while not self._stop_event.is_set():
