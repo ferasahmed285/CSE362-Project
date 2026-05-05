@@ -32,6 +32,7 @@ class GPUWorker:
         self.total_failed    = 0
         self.latency_history = deque(maxlen=500)
         self.metrics_lock    = threading.Lock()
+        self._stop_event     = threading.Event()  # FIX 9: clean shutdown
 
         threading.Thread(target=self._processing_loop, daemon=True).start()
         threading.Thread(target=self._monitor_load,    daemon=True).start()
@@ -51,10 +52,9 @@ class GPUWorker:
             if self.active_jobs >= self.max_capacity:
                 raise Exception(f"GPU-{self.id} at capacity ({self.active_jobs}/{self.max_capacity})")
             self.active_jobs += 1
-
-        # Update stats for LB routing decisions
-        if self.stats:
-            self.stats.active_connections = self.active_jobs
+            # FIX 7: update stats INSIDE the lock so LB sees consistent values
+            if self.stats:
+                self.stats.active_connections = self.active_jobs
 
         event = threading.Event()
         with self.events_lock:
@@ -62,9 +62,12 @@ class GPUWorker:
 
         self.request_queue.put(request)
 
-        if not event.wait(timeout=30.0):
+        # FIX 4: increased timeout to 120s for heavy load scenarios
+        if not event.wait(timeout=120.0):
             with self.load_lock:
                 self.active_jobs -= 1
+                if self.stats:
+                    self.stats.active_connections = self.active_jobs
             raise Exception(f"GPU-{self.id} timeout on request {request.id}")
 
         with self.results_lock:
@@ -91,6 +94,7 @@ class GPUWorker:
 
     def stop(self):
         self.is_alive = False
+        self._stop_event.set()  # FIX 9: signal processing loop to exit
 
     def get_metrics_summary(self) -> dict:
         with self.metrics_lock:
@@ -108,8 +112,8 @@ class GPUWorker:
         }
 
     def _processing_loop(self):
-        while True:
-            # Fix: check is_alive at top of every loop iteration
+        # FIX 9: exit loop when stop is signaled
+        while not self._stop_event.is_set():
             if not self.is_alive:
                 time.sleep(0.1)
                 continue
@@ -132,8 +136,8 @@ class GPUWorker:
             print(f"[GPU-{self.id}] Skipping req {request.id} - worker is DOWN")
             with self.load_lock:
                 self.active_jobs -= 1
-            if self.stats:
-                self.stats.active_connections = self.active_jobs
+                if self.stats:
+                    self.stats.active_connections = self.active_jobs
             self._deliver(request.id, {"id": request.id, "error": "Worker went down", "latency": 0})
             return
 
@@ -150,8 +154,8 @@ class GPUWorker:
             print(f"[GPU-{self.id}] Skipping req {first.id} - worker is DOWN")
             with self.load_lock:
                 self.active_jobs -= 1
-            if self.stats:
-                self.stats.active_connections = self.active_jobs
+                if self.stats:
+                    self.stats.active_connections = self.active_jobs
             self._deliver(first.id, {"id": first.id, "error": "Worker went down", "latency": 0})
             return
 
@@ -191,8 +195,9 @@ class GPUWorker:
         finally:
             with self.load_lock:
                 self.active_jobs -= 1
-            if self.stats:
-                self.stats.active_connections = self.active_jobs
+                # FIX 7: update stats INSIDE the lock
+                if self.stats:
+                    self.stats.active_connections = self.active_jobs
             self._deliver(request.id, response)
 
     def _handle_batch(self, requests):
@@ -222,8 +227,9 @@ class GPUWorker:
         finally:
             with self.load_lock:
                 self.active_jobs -= n
-            if self.stats:
-                self.stats.active_connections = self.active_jobs
+                # FIX 7: update stats INSIDE the lock
+                if self.stats:
+                    self.stats.active_connections = self.active_jobs
 
     def _deliver(self, request_id, response):
         with self.results_lock:
@@ -234,7 +240,8 @@ class GPUWorker:
                 event.set()
 
     def _monitor_load(self):
-        while True:
+        # FIX 9: exit loop when stop is signaled
+        while not self._stop_event.is_set():
             time.sleep(1.0)
             if self.stats and self.is_alive:
                 with self.load_lock:

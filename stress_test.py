@@ -1,19 +1,11 @@
 # stress_test.py
 # ============================================================
-# OPTIONAL STRESS TEST - 1000 REQUESTS
+# STRESS TEST - 1000 CONCURRENT REQUESTS
 #
-# This runs 1000 requests against the distributed system.
-# Because we use a real LLM (tinyllama via Ollama), this will
-# take significantly longer than the main demo (potentially
-# 30-60 minutes depending on hardware).
-#
-# The main demo (main.py) uses 10/20/24 users to show the
-# system working clearly within a reasonable time.
-# This file proves the system ARCHITECTURE supports 1000+
+# Proves the distributed system architecture supports 1000+
 # by queueing and processing them through the worker pool.
 #
-# How to run:
-#     python stress_test.py
+# How to run:     python stress_test.py
 # ============================================================
 
 import time
@@ -26,14 +18,14 @@ from client.load_generator import run_load_test
 
 def main():
     print("=" * 60)
-    print("  STRESS TEST: 1000 REQUESTS WITH REAL LLM")
-    print("  WARNING: This will take a long time (30-60 min)")
-    print("  Each request uses real tinyllama inference via Ollama")
+    print("  STRESS TEST: 1000 REQUESTS")
+    print("  8 workers x 15 capacity = 120 concurrent slots")
+    print("  Requests queue with backoff until a slot opens")
     print("=" * 60)
 
-    # 8 workers x 10 capacity = 80 active LLM slots
-    # The queue handles the remaining requests
-    workers = [GPUWorker(i, max_capacity=10, enable_batching=False) for i in range(8)]
+    # 8 workers x 15 capacity = 120 active slots
+    # The scheduler's backoff+retry handles the remaining requests
+    workers = [GPUWorker(i, max_capacity=15, enable_batching=False) for i in range(8)]
 
     lb        = LoadBalancer(workers)
     scheduler = Scheduler()
@@ -41,12 +33,12 @@ def main():
     scheduler.lb = lb
 
     try:
-        print("\n===== STRESS TEST: 1000 USERS (Real LLM) =====")
+        print("\n===== STRESS TEST: 1000 USERS =====")
         print("System will queue and process all 1000 requests.")
         print("Workers process requests as they complete.\n")
 
         start = time.time()
-        run_load_test(lb, num_users=1000, strategy="least_connections")
+        results = run_load_test(lb, num_users=1000, strategy="least_connections")
         elapsed = time.time() - start
 
         print(f"\nTotal wall time: {elapsed:.1f}s")
@@ -56,6 +48,7 @@ def main():
             print(
                 f"  GPU-{worker.id} | "
                 f"Processed: {summary['total_processed']:>4} | "
+                f"Failed: {summary['total_failed']:>2} | "
                 f"Avg: {summary['avg_latency_s']:.2f}s"
             )
 

@@ -2,12 +2,14 @@
 import queue
 import threading
 import time
+import random
 from common.models import RequestStatus, InternalTaskMessage
 
 class Scheduler:
     def __init__(self, lb=None):
         self.task_queue = queue.Queue()
         self.results    = {}
+        self.results_lock = threading.Lock()  # FIX 5: protect results dict
         self.lb         = lb
         self._stop_event = threading.Event()
 
@@ -42,21 +44,29 @@ class Scheduler:
     def submit_task(self, request, strategy="least_connections"):
         request.status = RequestStatus.PENDING
         event = threading.Event()
-        self.results[request.id] = {
-            "event":    event,
-            "response": None,
-            "request":  request,
-            "strategy": strategy
-        }
+        with self.results_lock:  # FIX 5: lock around results access
+            self.results[request.id] = {
+                "event":    event,
+                "response": None,
+                "request":  request,
+                "strategy": strategy
+            }
         self.task_queue.put(request.id)
 
-        # Issue 3 fix: timeout protection - never wait forever
-        if not event.wait(timeout=60):
-            self.results.pop(request.id, None)  # cleanup memory
-            return {"id": request.id, "error": "Scheduler timeout", "latency": 0}
+        # FIX 3: increased timeout to 300s for 1000-user stress tests
+        # Real LLM at ~5s/req, 1000 reqs / 80 slots = ~62s minimum
+        # Add generous headroom for retries and backoff
+        if not event.wait(timeout=300):
+            with self.results_lock:
+                self.results.pop(request.id, None)  # cleanup memory
+            return {"id": request.id, "error": "Scheduler timeout (300s)", "latency": 0}
 
-        response = self.results[request.id]["response"]
-        self.results.pop(request.id, None)  # cleanup memory after returning
+        with self.results_lock:  # FIX 5: lock around results access
+            entry = self.results.pop(request.id, None)
+        response = entry["response"] if entry else None
+
+        if response is None:
+            return {"id": request.id, "error": "No response from worker", "latency": 0}
         return response
 
     def _dispatch_loop(self):
@@ -65,7 +75,13 @@ class Scheduler:
                 req_id = self.task_queue.get(timeout=1.0)
             except queue.Empty:
                 continue
-            task_info = self.results[req_id]
+
+            # FIX 5: guard against KeyError if request was already timed out
+            with self.results_lock:
+                task_info = self.results.get(req_id)
+            if task_info is None:
+                continue  # request already timed out and was cleaned up
+
             threading.Thread(
                 target=self._run_worker_task_with_retries,
                 args=(req_id, task_info["request"], task_info["strategy"]),
@@ -73,11 +89,20 @@ class Scheduler:
             ).start()
 
     def _run_worker_task_with_retries(self, req_id, request, strategy):
-        retries     = request.retries
-        max_retries = request.max_retries
-        response    = None
+        retries  = 0
+        response = None
 
-        while retries < max_retries:
+        # FIX 1+2: Use a deadline instead of fixed retry count.
+        # Keep retrying with exponential backoff until the deadline expires.
+        # This ensures requests queue properly instead of failing instantly.
+        deadline = time.time() + 240  # 4-minute absolute deadline per task
+
+        while time.time() < deadline:
+            # FIX 5: check if the request was already timed out by submit_task
+            with self.results_lock:
+                if req_id not in self.results:
+                    return  # request was cleaned up, no need to continue
+
             try:
                 if strategy == "least_connections":
                     worker = self.lb.get_worker_least_connections()
@@ -88,10 +113,6 @@ class Scheduler:
             except Exception as e:
                 response = {"id": req_id, "error": str(e), "latency": 0}
                 break
-
-            # FIX 3: Scheduler does NOT touch active_connections.
-            # The worker manages its own active_jobs and updates stats directly.
-            # This removes the double-counting bug.
 
             try:
                 request.status = RequestStatus.PROCESSING
@@ -109,11 +130,16 @@ class Scheduler:
             except Exception as e:
                 err = str(e)
                 if "at capacity" in err or "capacity" in err.lower():
-                    print(f"[Master] Worker {worker.id} full, retrying on another...")
+                    # FIX 1: Exponential backoff with jitter when workers are full.
+                    # Instead of burning through retries instantly, we wait for a
+                    # slot to free up. Backoff caps at 3s to stay responsive.
+                    backoff = min(3.0, 0.1 * (2 ** min(retries, 5))) + random.uniform(0, 0.3)
+                    time.sleep(backoff)
                 else:
                     print(f"[Master] Worker {worker.id} error: {e}. Marking OFFLINE.")
                     with self.lb.lock:
                         self.lb.worker_stats[worker.id].is_alive = False
+                    time.sleep(0.5)  # brief pause before retrying on different worker
                 retries += 1
                 request.retries = retries
 
@@ -121,12 +147,16 @@ class Scheduler:
             request.status = RequestStatus.FAILED
             response = {
                 "id":    req_id,
-                "error": f"Failed after {max_retries} attempts.",
+                "error": f"Failed after {retries} retries (deadline expired).",
                 "latency": 0
             }
 
-        self.results[req_id]["response"] = response
-        self.results[req_id]["event"].set()
+        # FIX 5: safely update results
+        with self.results_lock:
+            entry = self.results.get(req_id)
+            if entry:
+                entry["response"] = response
+                entry["event"].set()
 
     def stop(self):
         self._stop_event.set()
