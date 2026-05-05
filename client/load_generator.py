@@ -1,23 +1,92 @@
+# client/load_generator.py
 import concurrent.futures
+import time
+import statistics
 from common.models import Request
 
-def simulate_user(lb, user_id):
-    request = Request(id=user_id, query=f"Query {user_id}")
-    # Target the Load Balancer via HTTP/gRPC abstraction exactly as a Client would!
-    response = lb.dispatch(request)
-    print(f"[Client] Response {response['id']} | Latency: {response['latency']:.3f}s")
-    return response
 
-def run_load_test(lb, num_users=1000):
-    print(f"[Client] Starting Load Test: Sending {num_users} simultaneous requests...")
-    # Use ThreadPoolExecutor to ensure dispatch() is hit concurrently.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=200) as executor:
-        futures = [executor.submit(simulate_user, lb, i) for i in range(num_users)]
-        
-        # Wait for all to complete
+def simulate_user(lb, user_id, strategy="least_connections"):
+    request = Request(
+        id=user_id,
+        query=f"Query {user_id}: explain load balancing and RAG"
+    )
+    start = time.time()
+    try:
+        response = lb.dispatch(request, strategy=strategy)
+        end = time.time()
+
+        # FIX 2: Check if response contains an error key
+        if response and isinstance(response, dict) and "error" in response:
+            return {
+                "id": user_id,
+                "latency": end - start,
+                "success": False,
+                "error": response["error"]
+            }
+
+        return {
+            "id": user_id,
+            "worker_id": response.get("worker_id", -1) if isinstance(response, dict) else -1,
+            "latency": end - start,
+            "success": True
+        }
+
+    except Exception as exc:
+        end = time.time()
+        return {
+            "id": user_id,
+            "latency": end - start,
+            "success": False,
+            "error": str(exc)
+        }
+
+
+def run_load_test(lb, num_users=1000, strategy="least_connections"):
+    print(f"\n[Client] Starting load test with {num_users} users...")
+
+    # FIX 1: max_workers matches num_users for truly concurrent simulation
+    max_workers = min(num_users, 1000)
+
+    start_time = time.time()
+    responses = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(simulate_user, lb, i, strategy)
+            for i in range(num_users)
+        ]
         for future in concurrent.futures.as_completed(futures):
-            try:
-                future.result()
-            except Exception as exc:
-                print(f"[Client] Request generated an exception: {exc}")
-    print("[Client] Load Test Complete.")
+            responses.append(future.result())
+
+    total_time = time.time() - start_time
+
+    success = [r for r in responses if r["success"]]
+    failed  = [r for r in responses if not r["success"]]
+    latencies = [r["latency"] for r in success]
+
+    print("\n========== RESULTS ==========")
+    print(f"Total Requests: {num_users}")
+    print(f"Success:        {len(success)}")
+    print(f"Failed:         {len(failed)}")
+    print(f"Total Time:     {total_time:.2f}s")
+    if total_time > 0:
+        print(f"Throughput:     {len(success)/total_time:.2f} req/sec")
+    if latencies:
+        print(f"Avg Latency:    {statistics.mean(latencies):.3f}s")
+        print(f"Min Latency:    {min(latencies):.3f}s")
+        print(f"Max Latency:    {max(latencies):.3f}s")
+        sorted_lat = sorted(latencies)
+        p95 = sorted_lat[int(0.95 * len(sorted_lat)) - 1]
+        print(f"P95 Latency:    {p95:.3f}s")
+    if failed:
+        print(f"Failed errors:  {set(r.get('error','?') for r in failed)}")
+    
+    # Show which workers handled requests (proves distribution)
+    worker_counts = {}
+    for r in success:
+        wid = r.get("worker_id", -1)
+        worker_counts[wid] = worker_counts.get(wid, 0) + 1
+    if worker_counts:
+        print(f"Worker distribution: { {f'GPU-{k}': v for k,v in sorted(worker_counts.items())} }")
+    print("============================\n")
+    return responses

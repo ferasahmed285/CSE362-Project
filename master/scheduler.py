@@ -1,3 +1,4 @@
+# master/scheduler.py
 import queue
 import threading
 import time
@@ -18,51 +19,53 @@ class Scheduler:
         # Start task dispatcher
         self.dispatcher_thread = threading.Thread(target=self._dispatch_loop, daemon=True)
         self.dispatcher_thread.start()
-
     def set_lb(self, lb):
         self.lb = lb
 
     def _health_check_loop(self):
-        """Pings every worker periodically (every 2.5 seconds) to update their alive status."""
+        """Pings every worker periodically to update their alive status."""
         while not self._stop_event.is_set():
             if not self.lb:
                 time.sleep(1.0)
                 continue
-                
+
             for worker in self.lb.workers:
                 try:
                     is_alive = hasattr(worker, 'ping') and worker.ping()
                     with self.lb.lock:
                         was_alive = self.lb.worker_stats[worker.id].is_alive
                         self.lb.worker_stats[worker.id].is_alive = bool(is_alive)
-                        
                         if not was_alive and is_alive:
-                            print(f"[Master] Worker {worker.id} has recovered and is back online!")
+                            print(f"[Master] Worker {worker.id} recovered and is back ONLINE")
                         elif was_alive and not is_alive:
-                            print(f"[Master] Worker {worker.id} failed ping. Marked offline.")
+                            print(f"[Master] Worker {worker.id} failed ping. Marked OFFLINE")
                 except Exception:
-                    # If ping fails or times out, mark as dead
                     with self.lb.lock:
                         if self.lb.worker_stats[worker.id].is_alive:
-                            print(f"[Master] Worker {worker.id} timed out. Marked offline.")
+                            print(f"[Master] Worker {worker.id} timed out. Marked OFFLINE")
                         self.lb.worker_stats[worker.id].is_alive = False
-            time.sleep(2.5)
+            time.sleep(15.0)  # Real LLM takes 5-10s per request, check less frequently
 
     def submit_task(self, request, strategy="least_connections"):
         """Called by the LB to hand off the task and block until completion."""
         request.status = RequestStatus.PENDING
         event = threading.Event()
         self.results[request.id] = {
-            "event": event, 
-            "response": None, 
-            "request": request, 
+            "event":    event,
+            "response": None,
+            "request":  request,
             "strategy": strategy
         }
         self.task_queue.put(request.id)
-        
-        # Wait for the Master to complete the task (including any retries)
-        event.wait()
-        return self.results[request.id]["response"]
+
+        # Issue 3 fix: timeout protection - never wait forever
+        if not event.wait(timeout=60):
+            self.results.pop(request.id, None)  # cleanup memory
+            return {"id": request.id, "error": "Scheduler timeout", "latency": 0}
+
+        response = self.results[request.id]["response"]
+        self.results.pop(request.id, None)  # cleanup memory after returning
+        return response
 
     def _dispatch_loop(self):
         """Pulls from the global queue and hands it directly to the assignment logic."""
@@ -71,23 +74,20 @@ class Scheduler:
                 req_id = self.task_queue.get(timeout=1.0)
             except queue.Empty:
                 continue
-                
             task_info = self.results[req_id]
-            request = task_info["request"]
-            strategy = task_info["strategy"]
-            
-            # Spin up a thread to process the worker assignment and retries without blocking the master queue!
-            t = threading.Thread(target=self._run_worker_task_with_retries, args=(req_id, request, strategy), daemon=True)
-            t.start()
+            threading.Thread(
+                target=self._run_worker_task_with_retries,
+                args=(req_id, task_info["request"], task_info["strategy"]),
+                daemon=True
+            ).start()
 
     def _run_worker_task_with_retries(self, req_id, request, strategy):
         """Handles task assignment, execution, and fault-tolerant reassignment."""
-        retries = request.retries
+        retries     = request.retries
         max_retries = request.max_retries
-        response = None
-        
+        response    = None
+
         while retries < max_retries:
-            # 1. Ask LB for a worker based on strategy
             try:
                 if strategy == "least_connections":
                     worker = self.lb.get_worker_least_connections()
@@ -99,46 +99,41 @@ class Scheduler:
                 response = {"id": req_id, "error": str(e), "latency": 0}
                 break
 
-            # 2. Increment active connections
-            with self.lb.lock:
-                self.lb.worker_stats[worker.id].active_connections += 1
+            # FIX 3: Scheduler does NOT touch active_connections.
+            # The worker manages its own active_jobs and updates stats directly.
+            # This removes the double-counting bug.
 
             try:
                 request.status = RequestStatus.PROCESSING
-                
-                # Construct internal message (for logging/debugging or future worker changes)
                 task_msg = InternalTaskMessage(
-                    request=request,
-                    worker_id=worker.id,
-                    failure_flags=["retried"] if retries > 0 else [],
-                    retry_count=retries
+                    request       = request,
+                    worker_id     = worker.id,
+                    failure_flags = ["retried"] if retries > 0 else [],
+                    retry_count   = retries
                 )
-                
-                # Execute on worker
                 worker_response = worker.process(request)
-                
-                request.status = RequestStatus.COMPLETED
-                response = worker_response
-                break  # Success, exit retry loop
-                
+                request.status  = RequestStatus.COMPLETED
+                response        = worker_response
+                break
+
             except Exception as e:
-                # 3. Fault Detection & Task Reassignment
-                print(f"[Master] Error on Worker {worker.id}: {e}. Marking as offline and reassigning...")
-                with self.lb.lock:
-                    self.lb.worker_stats[worker.id].is_alive = False
+                err = str(e)
+                if "at capacity" in err or "capacity" in err.lower():
+                    print(f"[Master] Worker {worker.id} full, retrying on another...")
+                else:
+                    print(f"[Master] Worker {worker.id} error: {e}. Marking OFFLINE.")
+                    with self.lb.lock:
+                        self.lb.worker_stats[worker.id].is_alive = False
                 retries += 1
                 request.retries = retries
-            finally:
-                # 4. Decrement active connections
-                with self.lb.lock:
-                    self.lb.worker_stats[worker.id].active_connections -= 1
 
-        # Final failure check
         if not response:
             request.status = RequestStatus.FAILED
-            response = {"id": req_id, "error": f"Failed to process request {request.id} after {max_retries} attempts.", "latency": 0}
-
-        # Save result and signal completion
+            response = {
+                "id":    req_id,
+                "error": f"Failed after {max_retries} attempts.",
+                "latency": 0
+            }
         self.results[req_id]["response"] = response
         self.results[req_id]["event"].set()
 
