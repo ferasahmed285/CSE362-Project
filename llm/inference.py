@@ -1,134 +1,73 @@
 # llm/inference.py
-# ============================================================
-# REAL LLM INFERENCE USING OLLAMA
-#
-# This replaces the simulation with a real AI model (tinyllama)
-# running locally via Ollama.
-#
-# Requirements:
-#   1. Install Ollama: https://ollama.com
-#   2. Pull the model: ollama pull tinyllama
-#   3. Install Python library: pip install ollama
-#
-# The rest of the distributed system (load balancer, scheduler,
-# GPU workers) stays exactly the same. Only this file changes.
-# ============================================================
+# Real LLM (Ollama) with automatic fallback to simulation
 
 import time
-import ollama
+import random
 
+_USE_REAL_LLM = False
+try:
+    import ollama
+    ollama.list()
+    _USE_REAL_LLM = True
+    print("[LLM] Ollama detected — using REAL LLM inference (tinyllama)")
+except Exception:
+    print("[LLM] Ollama not available — using SIMULATION mode")
 
-# ── Model Configuration ────────────────────────────────────
-MODEL_NAME   = "tinyllama"   # change to "llama2" or "mistral" if you have them
-MAX_TOKENS   = 150           # limit response length for speed
-TEMPERATURE  = 0.7           # 0=deterministic, 1=creative
+MODEL_NAME  = "tinyllama"
+MAX_TOKENS  = 150
+TEMPERATURE = 0.7
+
+_SIM_RESPONSES = [
+    "Load balancing distributes workloads across multiple computing resources to optimize utilization.",
+    "Distributed computing coordinates multiple computers to solve complex problems via parallel processing.",
+    "GPU clusters enable massive parallel computation, ideal for AI inference workloads.",
+    "Fault tolerance ensures availability by detecting failures and redistributing tasks to healthy nodes.",
+    "RAG enhances LLM responses by incorporating relevant info from external knowledge bases.",
+    "The master-worker architecture separates scheduling from execution for efficient resource management.",
+    "Round-robin distributes requests evenly across all available servers in sequential order.",
+    "Least-connections routing directs new requests to the server with fewest active connections.",
+    "Vector databases store embeddings as high-dimensional vectors for fast similarity search.",
+    "Batch processing groups multiple inference requests to maximize GPU throughput and efficiency.",
+]
 
 
 def run_llm(query: str, context: str = "") -> str:
-    """
-    Runs a real LLM inference using Ollama (tinyllama model).
-    
-    This is called by GPUWorker for each request.
-    Returns a real AI-generated answer.
-    
-    Args:
-        query:   the user's question
-        context: extra info retrieved from RAG module
-    
-    Returns:
-        str: real AI-generated response
-    """
-    # Build the prompt — include RAG context if available
+    if _USE_REAL_LLM:
+        return _run_real(query, context)
+    return _run_sim(query, context)
+
+
+def _run_real(query, context):
     if context and context != "No context available":
-        prompt = (
-            f"You are a helpful assistant. Use the following context to answer the question.\n\n"
-            f"Context: {context}\n\n"
-            f"Question: {query}\n\n"
-            f"Answer concisely in 2-3 sentences:"
-        )
+        prompt = (f"You are a helpful assistant. Use this context:\n\n"
+                  f"Context: {context}\n\nQuestion: {query}\n\nAnswer concisely in 2-3 sentences:")
     else:
-        prompt = (
-            f"You are a helpful assistant.\n\n"
-            f"Question: {query}\n\n"
-            f"Answer concisely in 2-3 sentences:"
-        )
-
+        prompt = f"You are a helpful assistant.\n\nQuestion: {query}\n\nAnswer concisely in 2-3 sentences:"
     try:
-        response = ollama.chat(
-            model   = MODEL_NAME,
-            messages = [{"role": "user", "content": prompt}],
-            options  = {
-                "num_predict": MAX_TOKENS,
-                "temperature": TEMPERATURE,
-            }
-        )
-        return response["message"]["content"].strip()
-
+        resp = ollama.chat(model=MODEL_NAME,
+                           messages=[{"role": "user", "content": prompt}],
+                           options={"num_predict": MAX_TOKENS, "temperature": TEMPERATURE})
+        return resp["message"]["content"].strip()
     except Exception as e:
-        raise RuntimeError(
-            f"LLM inference failed: {str(e)}. "
-            f"Make sure Ollama is running: 'ollama serve' and model is pulled: 'ollama pull tinyllama'"
-        )
+        raise RuntimeError(f"LLM inference failed: {e}. Ensure Ollama is running and tinyllama is pulled.")
+
+
+def _run_sim(query, context):
+    time.sleep(random.uniform(0.3, 1.5))
+    q = query.lower()
+    for r in _SIM_RESPONSES:
+        if len(set(r.lower().split()) & set(q.split())) >= 2:
+            return f"[Simulated] {r}"
+    return f"[Simulated] {random.choice(_SIM_RESPONSES)}"
 
 
 def run_llm_batch(requests: list) -> list:
-    """
-    Processes multiple queries through the real LLM.
-    
-    Note: Ollama does not natively support true batching like a GPU would.
-    We process sequentially here, but the GPUWorker's threading handles
-    the parallelism — multiple workers call run_llm() simultaneously.
-    
-    For the report: real GPU batching would use tensor parallelism
-    at the hardware level. Ollama simulates this by handling one
-    request at a time per model instance.
-    
-    Args:
-        requests: list of (query, context) tuples
-    
-    Returns:
-        list of answer strings
-    """
-    results = []
-    for query, context in requests:
-        result = run_llm(query, context)
-        results.append(result)
-    return results
+    return [run_llm(q, c) for q, c in requests]
 
 
-# ── Test: run this file directly to verify Ollama is working ──
 if __name__ == "__main__":
-    print("=== Testing Real LLM with Ollama ===\n")
-
-    # Test 1: simple question
-    print("Test 1: Simple question")
-    start  = time.time()
-    result = run_llm("What is machine learning?")
-    elapsed = time.time() - start
-    print(f"  Time:   {elapsed:.2f}s")
-    print(f"  Answer: {result}\n")
-
-    # Test 2: with RAG context
-    print("Test 2: With RAG context")
-    context = "Load balancing distributes requests across multiple servers to prevent overload."
-    start   = time.time()
-    result  = run_llm("What is load balancing?", context)
-    elapsed = time.time() - start
-    print(f"  Time:   {elapsed:.2f}s")
-    print(f"  Answer: {result}\n")
-
-    # Test 3: batch
-    print("Test 3: Batch of 3 queries")
-    queries = [
-        ("What is a GPU?", ""),
-        ("What is distributed computing?", ""),
-        ("What is fault tolerance?", ""),
-    ]
-    start   = time.time()
-    results = run_llm_batch(queries)
-    elapsed = time.time() - start
-    print(f"  Time: {elapsed:.2f}s for {len(queries)} queries")
-    for i, r in enumerate(results):
-        print(f"  Q{i+1}: {r[:80]}...")
-
-    print("\n=== Test complete ===")
+    print(f"=== Testing LLM ({'Real' if _USE_REAL_LLM else 'Sim'}) ===\n")
+    start = time.time()
+    print(f"  Answer: {run_llm('What is machine learning?')}")
+    print(f"  Time: {time.time()-start:.2f}s\n")
+    print("=== Test complete ===")

@@ -1,36 +1,46 @@
 # rag/retriever.py
 
 import os
+import threading
 
 KNOWLEDGE_BASE_PATH = "data/knowledge_base.txt"
 
 _cache = {}
+_cache_lock = threading.Lock()  # FIX 6: thread-safe cache access
 _knowledge_chunks = None
+_kb_lock = threading.Lock()  # FIX 6: thread-safe knowledge base loading
 
 
 def load_knowledge_base():
     global _knowledge_chunks
 
+    # Fast path: already loaded (read is safe without lock)
     if _knowledge_chunks is not None:
         return _knowledge_chunks
 
-    if not os.path.exists(KNOWLEDGE_BASE_PATH):
-        _knowledge_chunks = []
-        return _knowledge_chunks
+    with _kb_lock:
+        # Double-check after acquiring lock
+        if _knowledge_chunks is not None:
+            return _knowledge_chunks
 
-    with open(KNOWLEDGE_BASE_PATH, "r", encoding="utf-8") as file:
-        text = file.read()
+        if not os.path.exists(KNOWLEDGE_BASE_PATH):
+            _knowledge_chunks = []
+            return _knowledge_chunks
 
-    # Split into sentences
-    chunks = [chunk.strip() for chunk in text.split(".") if chunk.strip()]
-    _knowledge_chunks = chunks
-    return chunks
+        with open(KNOWLEDGE_BASE_PATH, "r", encoding="utf-8") as file:
+            text = file.read()
+
+        # Split into sentences
+        chunks = [chunk.strip() for chunk in text.split(".") if chunk.strip()]
+        _knowledge_chunks = chunks
+        return chunks
 
 
 def retrieve_context(query):
-    # Cache hit
-    if query in _cache:
-        return _cache[query]
+    # Cache hit (thread-safe read)
+    with _cache_lock:
+        if query in _cache:
+            return _cache[query]
 
     chunks = load_knowledge_base()
 
@@ -55,5 +65,7 @@ def retrieve_context(query):
     if not context:
         context = chunks[0]
 
-    _cache[query] = context
+    # Thread-safe write
+    with _cache_lock:
+        _cache[query] = context
     return context
