@@ -5,7 +5,6 @@ import time
 import random
 from common.models import RequestStatus, InternalTaskMessage
 
-
 class Scheduler:
     def __init__(
         self,
@@ -80,11 +79,7 @@ class Scheduler:
             with self.results_lock:
                 self.results.pop(request.id, None)
 
-            return {
-                "id": request.id,
-                "error": f"Scheduler timeout ({self.task_timeout}s)",
-                "latency": 0,
-            }
+            return {"id": request.id, "error": f"Scheduler timeout ({self.task_timeout}s)", "latency": 0}
 
         with self.results_lock:
             entry = self.results.pop(request.id, None)
@@ -138,13 +133,14 @@ class Scheduler:
         deadline = time.time() + self.capacity_wait_timeout
 
         while time.time() < deadline:
+            worker = None # Initialize to prevent UnboundLocalError in the finally block
+            
             with self.results_lock:
                 if req_id not in self.results:
                     return
 
             try:
                 worker = self._select_worker(strategy)
-
             except Exception as e:
                 response = {"id": req_id, "error": str(e), "latency": 0}
                 break
@@ -159,37 +155,44 @@ class Scheduler:
                     retry_count=retries,
                 )
 
+                # ==========================================
+                # CRITICAL UPDATE: Tell LB the connection opened
+                # ==========================================
+                self.lb.increment_connection(worker.id)
+
+                # Execute the worker logic
                 worker_response = worker.process(request)
+                
                 request.status = RequestStatus.COMPLETED
                 response = worker_response
                 break
 
             except Exception as e:
                 err = str(e)
-
                 if self._is_capacity_error(err):
-                    backoff = min(
-                        3.0,
-                        self.capacity_retry_delay * (2 ** min(retries, 5)),
-                    ) + random.uniform(0, 0.3)
+                    backoff = min(3.0, self.capacity_retry_delay * (2 ** min(retries, 5))) + random.uniform(0, 0.3)
                     time.sleep(backoff)
-
                 else:
                     print(f"[Master] Worker {worker.id} error: {e}. Marking OFFLINE.")
-
                     with self.lb.lock:
                         self.lb.worker_stats[worker.id].is_alive = False
-
                     time.sleep(self.capacity_retry_delay)
 
                 retries += 1
                 request.retries = retries
+                
+            finally:
+                # ==========================================
+                # CRITICAL UPDATE: Tell LB the connection closed
+                # ==========================================
+                if worker is not None:
+                    self.lb.decrement_connection(worker.id)
 
         if not response:
             request.status = RequestStatus.FAILED
             response = {
                 "id": req_id,
-                "error": f"Failed after {retries} retries (deadline expired after {self.capacity_wait_timeout}s).",
+                "error": f"Failed after {retries} retries (deadline expired).",
                 "latency": 0,
             }
 
