@@ -15,8 +15,17 @@ MAX_BATCH_SIZE       = 8
 
 
 class GPUWorker:
-    def __init__(self, id: int, max_capacity: int = DEFAULT_MAX_CAPACITY, enable_batching: bool = True):
+    def __init__(
+    self,
+    id: int,
+    max_capacity: int = DEFAULT_MAX_CAPACITY,
+    enable_batching: bool = True,
+    request_timeout: float = 1800,
+    ollama_url: str = "http://localhost:11434",
+):
         self.id              = id
+        self.request_timeout = request_timeout
+        self.ollama_url = ollama_url
         self.max_capacity    = max_capacity
         self.enable_batching = enable_batching
         self.is_alive        = True
@@ -80,11 +89,55 @@ class GPUWorker:
 
         return response
 
+    def _is_stale_request(self, request):
+        with self.events_lock:
+            return request.id not in self.events
+    def _update_active_stats(self):
+        stats = getattr(self, "stats", None)
+
+        if stats is not None:
+            stats.active_connections = self.active_jobs
+            stats.gpu_utilization = min(
+                100.0,
+                (self.active_jobs / max(1, self.max_capacity)) * 100.0
+            )
+
+    def _clear_pending_queue(self, reason="Worker failed"):
+        cleared = 0
+
+        while True:
+            try:
+                request = self.request_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            cleared += 1
+
+            with self.load_lock:
+                self.active_jobs = max(0, self.active_jobs - 1)
+                self._update_active_stats()
+
+            self._deliver(request.id, {
+                "id": request.id,
+                "worker_id": self.id,
+                "error": reason,
+                "latency": 0
+            })
+
+        return cleared
+
     def simulate_failure(self):
         self.is_alive = False
+
         if self.stats:
             self.stats.is_alive = False
-        print(f"[GPU-{self.id}] FAILURE SIMULATED - node is DOWN")
+
+        cleared = self._clear_pending_queue("Worker went down")
+
+        print(
+            f"[GPU-{self.id}] FAILURE SIMULATED - node is DOWN "
+            f"| cleared {cleared} pending queued requests"
+        )
 
     def recover(self):
         self.is_alive = True
@@ -132,13 +185,15 @@ class GPUWorker:
             return
 
         # FIX 4: Check is_alive before processing each request
-        if not self.is_alive:
-            print(f"[GPU-{self.id}] Skipping req {request.id} - worker is DOWN")
+        if self._is_stale_request(request):
             with self.load_lock:
-                self.active_jobs -= 1
-                if self.stats:
-                    self.stats.active_connections = self.active_jobs
-            self._deliver(request.id, {"id": request.id, "error": "Worker went down", "latency": 0})
+                self.active_jobs = max(0, self.active_jobs - 1)
+                self._update_active_stats()
+            print(f"[GPU-{self.id}] Dropped stale req {request.id}")
+            return
+
+        if not self.is_alive:
+            self._drop_request_because_down(request)
             return
 
         self._handle_one(request)
@@ -166,7 +221,21 @@ class GPUWorker:
                 batch.append(self.request_queue.get_nowait())
             except queue.Empty:
                 break
+        fresh_batch = []
 
+        for request in batch:
+            if self._is_stale_request(request):
+                with self.load_lock:
+                    self.active_jobs = max(0, self.active_jobs - 1)
+                    self._update_active_stats()
+                print(f"[GPU-{self.id}] Dropped stale req {request.id}")
+            else:
+                fresh_batch.append(request)
+
+        batch = fresh_batch
+
+        if not batch:
+            return
         if len(batch) == 1:
             self._handle_one(batch[0])
         else:
@@ -177,7 +246,7 @@ class GPUWorker:
         print(f"[GPU-{self.id}] Processing req {request.id}: '{request.query}'")
         try:
             context  = retrieve_context(request.query)
-            result   = run_llm(request.query, context)
+            result = run_llm(request.query, context, ollama_url=self.ollama_url)
             latency  = time.time() - start
             response = {"id": request.id, "worker_id": self.id, "result": result, "latency": latency}
             with self.metrics_lock:
@@ -206,7 +275,7 @@ class GPUWorker:
         print(f"[GPU-{self.id}] Batch processing {n} requests: {[r.id for r in requests]}")
         try:
             batch_input = [(r.query, retrieve_context(r.query)) for r in requests]
-            results     = run_llm_batch(batch_input)
+            results = run_llm_batch(batch_input, ollama_url=self.ollama_url)
             latency     = time.time() - start
             per_lat     = latency / n
             with self.metrics_lock:

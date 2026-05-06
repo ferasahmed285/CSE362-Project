@@ -43,7 +43,19 @@ def main():
     # Real LLM (tinyllama via Ollama) takes 3-10s per request
     # 8 workers x capacity 3 = 24 concurrent real LLM slots
     # This is realistic - real GPU servers handle limited concurrent inferences
-    workers = [GPUWorker(i, max_capacity=3, enable_batching=False) for i in range(8)]
+    OLLAMA_ENDPOINTS = [
+        "https://arrived-fully-character-teach.trycloudflare.com",
+        "https://tablets-adaptor-livestock-drop.trycloudflare.com",
+    ]
+
+    workers = [
+        GPUWorker(
+            i,
+            max_capacity=20,
+            enable_batching=False,
+            request_timeout=600,
+            ollama_url=OLLAMA_ENDPOINTS[i])
+        for i in range(len(OLLAMA_ENDPOINTS))]
 
     lb        = LoadBalancer(workers)
     scheduler = Scheduler()
