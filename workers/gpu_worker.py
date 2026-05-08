@@ -72,13 +72,22 @@ class GPUWorker:
         self.request_queue.put(request)
 
         # FIX 4: increased timeout to 120s for heavy load scenarios
-        if not event.wait(timeout=120.0):
+        if not event.wait(timeout=self.request_timeout):
+            with self.events_lock:
+                self.events.pop(request.id, None)
+
+            with self.results_lock:
+                self.results.pop(request.id, None)
+
             with self.load_lock:
-                self.active_jobs -= 1
+                self.active_jobs = max(0, self.active_jobs - 1)
                 if self.stats:
                     self.stats.active_connections = self.active_jobs
-            raise Exception(f"GPU-{self.id} timeout on request {request.id}")
 
+            raise Exception(
+                f"GPU-{self.id} timeout on request {request.id} "
+                f"after {self.request_timeout}s"
+            )
         with self.results_lock:
             response = self.results.pop(request.id, None)
         with self.events_lock:
