@@ -25,6 +25,26 @@ class LoadBalancer:
         # NOTE: The health check loop has been moved to the Master Node (Scheduler)
         # to properly separate Routing from Orchestration & Resilience.
 
+    def ping_worker(self, worker):
+        """
+        Health check for a specific worker.
+        """
+        try:
+            return worker.ping()
+        except Exception as e:
+            print(f"[LB] Health check failed for worker {worker.id}: {e}")
+            return False
+
+    def refresh_worker_health(self):
+        """
+        Checks every worker's real Cloudflare/Ollama health
+        and updates load balancer stats.
+        """
+        with self.lock:
+            for worker in self.workers:
+                alive = worker.ping()
+                self.worker_stats[worker.id].is_alive = alive
+
     def stop(self):
         # Stop signal removed as LB no longer runs threads natively.
         pass

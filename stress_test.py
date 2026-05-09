@@ -18,7 +18,7 @@ from client.load_generator import run_load_test
 
 
 OLLAMA_ENDPOINTS = [
-    "https://clearly-integrate-engines-cooperative.trycloudflare.com",
+    "https://wednesday-glass-perfect-standing.trycloudflare.com",
     "https://windsor-dream-adapters-fighter.trycloudflare.com",
 ]
 
