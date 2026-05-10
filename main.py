@@ -44,8 +44,8 @@ def main():
     # 8 workers x capacity 3 = 24 concurrent real LLM slots
     # This is realistic - real GPU servers handle limited concurrent inferences
     OLLAMA_ENDPOINTS = [
-        "https://arrived-fully-character-teach.trycloudflare.com",
-        "https://tablets-adaptor-livestock-drop.trycloudflare.com",
+        "https://clearly-integrate-engines-cooperative.trycloudflare.com",
+        "https://windsor-dream-adapters-fighter.trycloudflare.com",
     ]
 
     workers = [

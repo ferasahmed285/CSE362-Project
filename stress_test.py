@@ -18,8 +18,8 @@ from client.load_generator import run_load_test
 
 
 OLLAMA_ENDPOINTS = [
-    "https://arrived-fully-character-teach.trycloudflare.com",
-    "https://tablets-adaptor-livestock-drop.trycloudflare.com",
+    "https://wednesday-glass-perfect-standing.trycloudflare.com",
+    "https://windsor-dream-adapters-fighter.trycloudflare.com",
 ]
 
 NUM_USERS = 1000

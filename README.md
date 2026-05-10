@@ -7,166 +7,90 @@
 
 ## Project Overview
 
-This project implements a distributed system that handles concurrent user requests using a real Large Language Model (LLM) inference engine and Retrieval-Augmented Generation (RAG). The system demonstrates efficient load balancing, GPU cluster task distribution, fault tolerance, and scalability using a real AI model running locally via Ollama.
+This project implements a distributed load balancing system for handling concurrent user requests involving Large Language Model (LLM) inference and Retrieval-Augmented Generation (RAG). The system demonstrates efficient task distribution, fault tolerance, and scalability by utilizing multiple physical laptop GPU workers exposed through **Cloudflare Tunnels**.
+
+### Key Achievements
+- **Real Distributed Environment:** GPU workers run on separate physical machines (laptops) connected via Cloudflare tunnels, making it a true distributed computing setup.
+- **Real LLM Integration:** Uses the **tinyllama** model via Ollama to generate genuine AI responses.
+- **High Concurrency:** Built to handle stress tests of 1000+ concurrent requests.
+
+---
+
+## System Architecture
+
+```text
+Client Layer (Concurrent Users)
+        ↓
+Load Balancer (Routing strategy selection)
+        ↓
+Master Node / Scheduler (Task queuing + fault detection)
+        ↓ (via Cloudflare Tunnels)
+Distributed GPU Workers (Multiple Laptops running Ollama + RAG)
+        ↑
+RAG Module (Knowledge base retrieval)
+```
+
+### Load Balancing Strategies Implemented
+1. **Round Robin:** Distributes requests sequentially across all alive workers.
+2. **Least Connections:** Routes each new request to the worker with the fewest active connections.
+3. **Load Aware:** Calculates a composite load score based on active connections and GPU utilization, routing to the optimal worker.
+
+### Fault Tolerance Mechanisms
+- **Health monitoring:** The Master node periodically pings all remote laptop workers.
+- **Failure detection:** A worker is automatically marked offline if a Cloudflare tunnel drops or the node becomes unresponsive.
+- **Task reassignment:** Failed tasks are automatically retried on other available remote workers, ensuring 0 dropped requests during a worker crash.
 
 ---
 
 ## Requirements
 
 - Python 3.9+
-- Ollama (local LLM runtime)
-- ollama Python library
+- Ollama installed on each worker laptop
+- `tinyllama` model pulled in Ollama
+- Cloudflared tunnel installed for each worker
+- Python libraries: `ollama`, `requests` (see `requirements.txt`)
 
 ---
 
-## Setup Instructions
+## Setup & Execution Instructions
 
-### Step 1 — Install Ollama
-Download and install from: **https://ollama.com**
+### 1. Worker Setup (Run on each laptop GPU worker)
+1. Start Ollama on the worker laptop.
+2. Pull the model (if not already downloaded):
+   ```bash
+   ollama pull tinyllama
+   ```
+3. Expose the worker using a Cloudflare tunnel:
+   ```bash
+   cloudflared tunnel --url http://localhost:11434 --http-host-header="localhost:11434"
+   ```
 
-### Step 2 — Pull the AI model
-```bash
-ollama pull tinyllama
-```
-This downloads the tinyllama model (~637MB). It is a real neural network that generates actual AI responses.
-
-### Step 3 — Start Ollama server
-```bash
-ollama serve
-```
-Keep this running in a separate terminal while using the project.
-
-### Step 4 — Install Python dependencies
-```bash
-pip install -r requirements.txt
-```
-
-### Step 5 — Run the project
-```bash
-python main.py
-```
-
-### Step 6 — Run unit tests
-```bash
-python test_lb.py
-```
+### 2. Master Setup (Run on the central controller)
+1. Install Python dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Update the configuration:
+   Copy the generated Cloudflare URLs from your workers and paste them into the worker configurations in the code (e.g., in `main.py` or the stress tests).
+3. Run the main system:
+   ```bash
+   python main.py
+   ```
 
 ---
 
-## Folder Structure
+## Testing & Evaluation
 
-```
-CSE362-Project/
-├── common/
-│   └── models.py           # Shared data models (Request, Response, WorkerStats)
-├── lb/
-│   └── load_balancer.py    # Load balancer with 3 routing strategies
-├── master/
-│   └── scheduler.py        # Master node: task scheduling + fault detection
-├── workers/
-│   └── gpu_worker.py       # GPU worker with capacity limits and fault tolerance
-├── llm/
-│   └── inference.py        # Real LLM inference using Ollama (tinyllama)
-├── rag/
-│   └── retriever.py        # RAG module with keyword-based retrieval
-├── client/
-│   └── load_generator.py   # Load generator simulating concurrent users
-├── data/
-│   └── knowledge_base.txt  # Knowledge base for RAG retrieval
-├── main.py                 # Main entry point - runs all 6 tests
-├── test_lb.py              # Unit tests for load balancer + scheduler
-├── requirements.txt        # Python dependencies
-└── README.md               # This file
-```
+Run the following scripts to evaluate system performance, load distribution, and fault tolerance:
+
+- `python main.py` - Runs the default demo and testing suite.
+- `python test_lb.py` - Unit tests for the load balancer and scheduler.
+- `python stress_test.py` - Stress testing for up to 1000 concurrent users.
+- `python stress_test_2.py` - Advanced stress testing and failure simulation scenarios.
 
 ---
 
-## How It Works
-
-### Real LLM Integration
-Unlike simulated systems, this project uses **tinyllama** — a real neural network running locally via Ollama. Each request is processed by the actual model, producing genuine AI-generated responses. This means:
-- Each request takes 1-10 seconds of real computation
-- Responses are different each time (non-deterministic)
-- The system must handle real-world latency variance
-
-### System Architecture
-
-```
-Client Layer (concurrent users)
-        ↓
-Load Balancer (routing strategy selection)
-        ↓
-Master Node / Scheduler (task queuing + fault detection)
-        ↓
-GPU Workers 0-7 (real LLM inference via Ollama + RAG)
-        ↑
-RAG Module (knowledge base retrieval)
-```
-
----
-
-## Load Balancing Strategies
-
-### 1. Round Robin
-Distributes requests sequentially across all alive workers in circular order.
-
-### 2. Least Connections
-Routes each new request to the worker with the fewest active connections.
-
-### 3. Load Aware
-Calculates a composite load score using active connections and GPU utilization, routing to the lowest-scored worker.
-
----
-
-## Fault Tolerance
-
-- **Health monitoring:** Master node pings all workers every 15 seconds
-- **Failure detection:** Worker marked offline if ping fails
-- **Task reassignment:** Failed tasks automatically retried on other workers (up to 5 attempts)
-- **Recovery:** Workers automatically come back online after recovery
-- **Demo:** Test 3 kills Worker 1 mid-run — system recovers with 0 failed requests
-
----
-
-## Testing & Results
-
-Tests use real LLM inference (tinyllama via Ollama). User counts in the default demo are lower than simulation because real AI inference takes 1-10 seconds per request — this is the realistic behavior of actual GPU-based LLM serving systems.
-
-### Default Demo (main.py)
-
-| Test | Users | Success | Failed | Throughput | Avg Latency |
-|------|-------|---------|--------|------------|-------------|
-| Test 1 | 10 | 10 | 0 | 1.17 req/s | 5.17s |
-| Test 2 | 20 | 20 | 0 | 1.26 req/s | 8.43s |
-| Test 3 + failure | 24 | 24 | 0 | 0.77 req/s | 10.74s |
-| Round Robin | 24 | 24 | 0 | 1.22 req/s | 10.56s |
-| Least Connections | 24 | 24 | 0 | 1.07 req/s | 11.81s |
-| Load Aware | 24 | 24 | 0 | 1.09 req/s | 11.16s |
-
-### 1000-User Stress Test (stress_test.py)
-
-The system architecture fully supports 1000+ concurrent requests. The worker pool queues and processes all requests using real LLM inference. Run with:
-
-```bash
-python stress_test.py
-```
-
-**Note:** With real LLM inference taking 1-10 seconds per request and 8 workers × 10 capacity = 80 concurrent slots, 1000 requests will take approximately 30-60 minutes to complete. This is expected behavior for real neural network inference on consumer hardware without a dedicated GPU.
-
----
-
-## Limitations
-
-- Ollama processes one request at a time per worker (no true GPU batching without hardware)
-- Knowledge base is small (20 sentences) — production RAG uses vector databases
-- No persistent storage — all state is in-memory
-- tinyllama is a small model — larger models like Llama2-7B would give better responses but require more RAM
-
----
-
-## Team Members
-
-- Member 1: Load Balancer (`lb/`)
-- Member 2: Master Node / Scheduler (`master/`)
-- Member 3: GPU Workers + LLM Inference (`workers/`, `llm/`)
-- Member 4: RAG + Client Load Generator (`rag/`, `client/`)
+## Limitations & Future Work
+- Ollama processes one request at a time per worker instance (no true hardware batching).
+- The knowledge base for RAG is currently a text stub; a full production system would upgrade to a vector database.
+- `tinyllama` is a small model for performance purposes; larger models would yield better AI responses but require more RAM.

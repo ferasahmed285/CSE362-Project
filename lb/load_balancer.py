@@ -35,6 +35,30 @@ class LoadBalancer:
                 0, self.worker_stats[worker_id].active_connections - 1
             )
 
+    def ping_worker(self, worker):
+        """
+        Health check for a specific worker.
+        """
+        try:
+            return worker.ping()
+        except Exception as e:
+            print(f"[LB] Health check failed for worker {worker.id}: {e}")
+            return False
+
+    def refresh_worker_health(self):
+        """
+        Checks every worker's real Cloudflare/Ollama health
+        and updates load balancer stats.
+        """
+        with self.lock:
+            for worker in self.workers:
+                alive = worker.ping()
+                self.worker_stats[worker.id].is_alive = alive
+
+    def stop(self):
+        # Stop signal removed as LB no longer runs threads natively.
+        pass
+
     def get_worker_round_robin(self):
         """Baseline strategy: cycles through alive workers sequentially."""
         with self.lock:
@@ -80,4 +104,6 @@ class LoadBalancer:
         if not self.scheduler:
             raise Exception("LoadBalancer has no attached Master/Scheduler!")
             
+        # The Master Node now handles fault detection and task reassignment.
+        # It will call get_worker_* methods to fetch a node based on the given strategy.
         return self.scheduler.submit_task(request, strategy=strategy)
